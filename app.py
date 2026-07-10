@@ -12,6 +12,10 @@ st.write(
     "rendimiento y riesgo. El resultado es orientativo y no constituye una recomendación financiera."
 )
 
+if st.button("Actualizar datos"):
+    st.cache_data.clear()
+    st.rerun()
+    
 # -----------------------------
 # Selección del usuario
 # -----------------------------
@@ -62,39 +66,61 @@ tickers = [activos_disponibles[a] for a in activos_elegidos]
 
 @st.cache_data(ttl=1800)
 def descargar_datos(tickers, periodo):
-    precios = pd.DataFrame()
+    series = {}
+    errores = []
 
     for ticker in tickers:
         try:
-            data = yf.download(
-                ticker,
+            data = yf.Ticker(ticker).history(
                 period=periodo,
-                auto_adjust=False,
-                progress=False,
-                threads=False
+                interval="1d",
+                auto_adjust=True
             )
 
-            if data.empty:
+            if data is None or data.empty:
+                errores.append(f"{ticker}: no devolvió datos.")
                 continue
 
-            if "Adj Close" in data.columns:
-                serie = data["Adj Close"]
-            elif "Close" in data.columns:
-                serie = data["Close"]
+            if "Close" not in data.columns:
+                errores.append(f"{ticker}: no tiene columna Close.")
+                continue
+
+            serie = data["Close"].dropna().copy()
+
+            # Normalizar fechas para poder comparar cripto con acciones/ETFs
+            serie.index = pd.to_datetime(serie.index)
+
+            if serie.index.tz is not None:
+                serie.index = serie.index.tz_localize(None)
+
+            serie.index = serie.index.normalize()
+            serie.name = ticker
+
+            if len(serie) >= 30:
+                series[ticker] = serie
             else:
-                continue
+                errores.append(f"{ticker}: tiene menos de 30 observaciones.")
 
-            precios[ticker] = serie
+        except Exception as e:
+            errores.append(f"{ticker}: error al descargar datos ({e}).")
 
-        except Exception:
-            continue
+    if len(series) == 0:
+        return pd.DataFrame(), errores
 
-    precios = precios.dropna(how="all")
-    precios = precios.ffill().dropna()
+    # Usamos fechas comunes para comparar correctamente los activos
+    precios = pd.concat(series.values(), axis=1, join="inner")
+    precios = precios.sort_index()
+    precios = precios.replace([np.inf, -np.inf], np.nan)
+    precios = precios.dropna()
 
-    return precios
+    return precios, errores
 
-datos = descargar_datos(tickers, periodo)
+datos, errores_descarga = descargar_datos(tickers, periodo)
+
+if errores_descarga:
+    with st.expander("Ver diagnóstico de descarga"):
+        for error in errores_descarga:
+            st.write(error)
 
 if datos.empty or len(datos) < 30:
     st.error("No hay datos suficientes para los activos seleccionados. Probá con otros activos o con otro período.")
