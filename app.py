@@ -62,34 +62,37 @@ tickers = [activos_disponibles[a] for a in activos_elegidos]
 
 @st.cache_data(ttl=1800)
 def descargar_datos(tickers, periodo):
-    try:
-        datos = yf.download(
-            tickers,
-            period=periodo,
-            auto_adjust=True,
-            progress=False,
-            threads=False
-        )
+    precios = pd.DataFrame()
 
-        if datos.empty:
-            return pd.DataFrame()
+    for ticker in tickers:
+        try:
+            data = yf.download(
+                ticker,
+                period=periodo,
+                auto_adjust=False,
+                progress=False,
+                threads=False
+            )
 
-        if isinstance(datos.columns, pd.MultiIndex):
-            if "Close" in datos.columns.get_level_values(0):
-                precios = datos["Close"]
+            if data.empty:
+                continue
+
+            if "Adj Close" in data.columns:
+                serie = data["Adj Close"]
+            elif "Close" in data.columns:
+                serie = data["Close"]
             else:
-                return pd.DataFrame()
-        else:
-            if "Close" in datos.columns:
-                precios = datos[["Close"]]
-                precios.columns = tickers
-            else:
-                return pd.DataFrame()
+                continue
 
-        precios = precios.dropna(how="all")
-        precios = precios.ffill().dropna()
+            precios[ticker] = serie
 
-        return precios
+        except Exception as e:
+            continue
+
+    precios = precios.dropna(how="all")
+    precios = precios.ffill().dropna()
+
+    return precios
 
     except Exception as e:
         st.error("No se pudieron descargar correctamente los datos. Puede ser un error temporal de Yahoo Finance.")
