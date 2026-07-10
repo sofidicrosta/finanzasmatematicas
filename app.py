@@ -95,7 +95,8 @@ def descargar_datos(tickers, periodo):
     return precios
 
 datos = descargar_datos(tickers, periodo)
-if datos.empty or len(datos) < 2:
+
+if datos.empty or len(datos) < 30:
     st.error("No hay datos suficientes para los activos seleccionados. Probá con otros activos o con otro período.")
     st.stop()
 
@@ -103,20 +104,37 @@ if datos.empty or len(datos) < 2:
 mapa_nombres = dict(zip(tickers, activos_elegidos))
 datos = datos.rename(columns=mapa_nombres)
 
-if datos.empty:
-    st.error("No se pudieron descargar datos para los activos seleccionados.")
+# Eliminar activos que no tengan suficientes datos
+columnas_validas = []
+for col in datos.columns:
+    if datos[col].dropna().shape[0] >= 30:
+        columnas_validas.append(col)
+
+datos = datos[columnas_validas]
+
+if len(datos.columns) < 2:
+    st.error("No hay al menos dos activos con datos suficientes para comparar. Probá con otros activos o con otro período.")
     st.stop()
+
+# Completar datos faltantes sin eliminar toda la tabla
+datos = datos.ffill().bfill()
 
 # -----------------------------
 # Cálculo de métricas
 # -----------------------------
 
-retornos = datos.pct_change().dropna()
+retornos = datos.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+
+if retornos.empty:
+    st.error("No se pudieron calcular retornos para los activos seleccionados.")
+    st.stop()
 
 rendimiento_acumulado = (datos.iloc[-1] / datos.iloc[0]) - 1
 volatilidad_anualizada = retornos.std() * np.sqrt(252)
 retorno_anualizado = retornos.mean() * 252
-sharpe = retorno_anualizado / volatilidad_anualizada
+
+# Evitar divisiones por cero
+sharpe = retorno_anualizado / volatilidad_anualizada.replace(0, np.nan)
 
 maximos_acumulados = datos.cummax()
 drawdown = (datos / maximos_acumulados) - 1
@@ -129,6 +147,13 @@ tabla_metricas = pd.DataFrame({
     "Sharpe simplificado": sharpe,
     "Máxima caída (%)": maxima_caida * 100
 })
+
+# Limpiar posibles errores
+tabla_metricas = tabla_metricas.replace([np.inf, -np.inf], np.nan).dropna()
+
+if tabla_metricas.empty or len(tabla_metricas) < 2:
+    st.error("No se pudieron calcular métricas suficientes para comparar los activos seleccionados.")
+    st.stop()
 
 # -----------------------------
 # Score según perfil
