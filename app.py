@@ -86,18 +86,13 @@ def descargar_datos(tickers, periodo):
 
             precios[ticker] = serie
 
-        except Exception as e:
+        except Exception:
             continue
 
     precios = precios.dropna(how="all")
     precios = precios.ffill().dropna()
 
     return precios
-
-    except Exception as e:
-        st.error("No se pudieron descargar correctamente los datos. Puede ser un error temporal de Yahoo Finance.")
-        st.write("Detalle técnico:", e)
-        return pd.DataFrame()
 
 datos = descargar_datos(tickers, periodo)
 if datos.empty or len(datos) < 2:
