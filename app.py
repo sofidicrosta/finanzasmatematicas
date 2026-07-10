@@ -60,25 +60,46 @@ tickers = [activos_disponibles[a] for a in activos_elegidos]
 # Descargar datos
 # -----------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def descargar_datos(tickers, periodo):
-    datos = yf.download(
-        tickers,
-        period=periodo,
-        auto_adjust=True,
-        progress=False
-    )
+    try:
+        datos = yf.download(
+            tickers,
+            period=periodo,
+            auto_adjust=True,
+            progress=False,
+            threads=False
+        )
 
-    if isinstance(datos.columns, pd.MultiIndex):
-        precios = datos["Close"]
-    else:
-        precios = datos[["Close"]]
-        precios.columns = tickers
+        if datos.empty:
+            return pd.DataFrame()
 
-    precios = precios.dropna()
-    return precios
+        if isinstance(datos.columns, pd.MultiIndex):
+            if "Close" in datos.columns.get_level_values(0):
+                precios = datos["Close"]
+            else:
+                return pd.DataFrame()
+        else:
+            if "Close" in datos.columns:
+                precios = datos[["Close"]]
+                precios.columns = tickers
+            else:
+                return pd.DataFrame()
+
+        precios = precios.dropna(how="all")
+        precios = precios.ffill().dropna()
+
+        return precios
+
+    except Exception as e:
+        st.error("No se pudieron descargar correctamente los datos. Puede ser un error temporal de Yahoo Finance.")
+        st.write("Detalle técnico:", e)
+        return pd.DataFrame()
 
 datos = descargar_datos(tickers, periodo)
+if datos.empty or len(datos) < 2:
+    st.error("No hay datos suficientes para los activos seleccionados. Probá con otros activos o con otro período.")
+    st.stop()
 
 # Renombrar columnas para que aparezcan con nombres lindos
 mapa_nombres = dict(zip(tickers, activos_elegidos))
