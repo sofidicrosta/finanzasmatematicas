@@ -2,7 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import altair as alt
 
 st.set_page_config(page_title="Comparador de Activos", layout="wide")
 
@@ -15,7 +15,7 @@ st.write(
 if st.button("Actualizar datos"):
     st.cache_data.clear()
     st.rerun()
-    
+
 # -----------------------------
 # Selección del usuario
 # -----------------------------
@@ -71,26 +71,36 @@ def descargar_datos(tickers, periodo):
 
     for ticker in tickers:
         try:
-            data = yf.Ticker(ticker).history(
+            data = yf.download(
+                ticker,
                 period=periodo,
                 interval="1d",
-                auto_adjust=True
+                auto_adjust=True,
+                progress=False,
+                threads=False
             )
 
             if data is None or data.empty:
                 errores.append(f"{ticker}: no devolvió datos.")
                 continue
 
-            if "Close" not in data.columns:
-                errores.append(f"{ticker}: no tiene columna Close.")
-                continue
+            if isinstance(data.columns, pd.MultiIndex):
+                if "Close" in data.columns.get_level_values(0):
+                    serie = data["Close"].iloc[:, 0]
+                else:
+                    errores.append(f"{ticker}: no tiene columna Close.")
+                    continue
+            else:
+                if "Close" in data.columns:
+                    serie = data["Close"]
+                else:
+                    errores.append(f"{ticker}: no tiene columna Close.")
+                    continue
 
-            serie = data["Close"].dropna().copy()
-
-            # Normalizar fechas para poder comparar cripto con acciones/ETFs
+            serie = serie.dropna().copy()
             serie.index = pd.to_datetime(serie.index)
 
-            if serie.index.tz is not None:
+            if getattr(serie.index, "tz", None) is not None:
                 serie.index = serie.index.tz_localize(None)
 
             serie.index = serie.index.normalize()
@@ -107,42 +117,40 @@ def descargar_datos(tickers, periodo):
     if len(series) == 0:
         return pd.DataFrame(), errores
 
-    # Usamos fechas comunes para comparar correctamente los activos
     precios = pd.concat(series.values(), axis=1, join="inner")
     precios = precios.sort_index()
-    precios = precios.replace([np.inf, -np.inf], np.nan)
-    precios = precios.dropna()
+    precios = precios.replace([np.inf, -np.inf], np.nan).dropna()
 
     return precios, errores
 
+
 datos, errores_descarga = descargar_datos(tickers, periodo)
-
-if errores_descarga:
-    with st.expander("Ver diagnóstico de descarga"):
-        for error in errores_descarga:
-            st.write(error)
-
-if datos.empty or len(datos) < 30:
-    st.error("No hay datos suficientes para los activos seleccionados. Probá con otros activos o con otro período.")
-    st.stop()
 
 # Renombrar columnas para que aparezcan con nombres lindos
 mapa_nombres = dict(zip(tickers, activos_elegidos))
 datos = datos.rename(columns=mapa_nombres)
 
-# Eliminar activos que no tengan suficientes datos
-columnas_validas = []
-for col in datos.columns:
-    if datos[col].dropna().shape[0] >= 30:
-        columnas_validas.append(col)
+with st.expander("Diagnóstico de descarga"):
+    st.write(f"Activos seleccionados: {activos_elegidos}")
+    st.write(f"Tickers usados: {tickers}")
+    st.write(f"Período seleccionado: {periodo}")
+    st.write(f"Filas descargadas: {datos.shape[0]}")
+    st.write(f"Columnas descargadas: {datos.shape[1]}")
+    if errores_descarga:
+        st.write("Errores detectados:")
+        for error in errores_descarga:
+            st.write(error)
+    else:
+        st.write("No se detectaron errores de descarga.")
 
-datos = datos[columnas_validas]
-
-if len(datos.columns) < 2:
-    st.error("No hay al menos dos activos con datos suficientes para comparar. Probá con otros activos o con otro período.")
+if datos.empty or len(datos) < 30:
+    st.error("No hay datos suficientes para los activos seleccionados. Probá con otros activos o con otro período.")
     st.stop()
 
-# Completar datos faltantes sin eliminar toda la tabla
+if len(datos.columns) < 2:
+    st.error("No hay al menos dos activos con datos suficientes para comparar.")
+    st.stop()
+
 datos = datos.ffill().bfill()
 
 # -----------------------------
@@ -158,8 +166,6 @@ if retornos.empty:
 rendimiento_acumulado = (datos.iloc[-1] / datos.iloc[0]) - 1
 volatilidad_anualizada = retornos.std() * np.sqrt(252)
 retorno_anualizado = retornos.mean() * 252
-
-# Evitar divisiones por cero
 sharpe = retorno_anualizado / volatilidad_anualizada.replace(0, np.nan)
 
 maximos_acumulados = datos.cummax()
@@ -174,7 +180,6 @@ tabla_metricas = pd.DataFrame({
     "Máxima caída (%)": maxima_caida * 100
 })
 
-# Limpiar posibles errores
 tabla_metricas = tabla_metricas.replace([np.inf, -np.inf], np.nan).dropna()
 
 if tabla_metricas.empty or len(tabla_metricas) < 2:
@@ -240,10 +245,7 @@ ranking_final = ranking.sort_values("Score final", ascending=False)
 
 st.subheader("Tabla de métricas")
 
-st.dataframe(
-    tabla_metricas.round(2),
-    use_container_width=True
-)
+st.dataframe(tabla_metricas.round(2), use_container_width=True)
 
 mejor_activo = ranking_final.index[0]
 peor_activo = ranking_final.index[-1]
@@ -271,19 +273,28 @@ st.caption(
 st.subheader("Evolución normalizada de los activos")
 
 precios_normalizados = datos / datos.iloc[0] * 100
+precios_plot = precios_normalizados.reset_index()
+precios_plot = precios_plot.rename(columns={precios_plot.columns[0]: "Fecha"})
+precios_plot = precios_plot.melt(
+    id_vars="Fecha",
+    var_name="Activo",
+    value_name="Valor normalizado"
+)
 
-fig1, ax1 = plt.subplots(figsize=(10, 5))
+chart_precios = (
+    alt.Chart(precios_plot)
+    .mark_line()
+    .encode(
+        x="Fecha:T",
+        y="Valor normalizado:Q",
+        color="Activo:N",
+        tooltip=["Fecha:T", "Activo:N", "Valor normalizado:Q"]
+    )
+    .properties(height=420)
+    .interactive()
+)
 
-for activo in precios_normalizados.columns:
-    ax1.plot(precios_normalizados.index, precios_normalizados[activo], label=activo)
-
-ax1.set_title("Evolución normalizada base 100")
-ax1.set_xlabel("Fecha")
-ax1.set_ylabel("Valor normalizado")
-ax1.legend()
-ax1.grid(True)
-
-st.pyplot(fig1)
+st.altair_chart(chart_precios, use_container_width=True)
 
 # -----------------------------
 # Gráfico 2: riesgo vs rendimiento
@@ -291,20 +302,29 @@ st.pyplot(fig1)
 
 st.subheader("Riesgo vs rendimiento")
 
-fig2, ax2 = plt.subplots(figsize=(10, 5))
+scatter_data = tabla_metricas.reset_index().rename(columns={"index": "Activo"})
 
-for activo in tabla_metricas.index:
-    x = tabla_metricas.loc[activo, "Volatilidad anualizada (%)"]
-    y = tabla_metricas.loc[activo, "Rendimiento acumulado (%)"]
-    ax2.scatter(x, y, s=120)
-    ax2.text(x, y, activo, fontsize=10, ha="left", va="bottom")
+base = alt.Chart(scatter_data).encode(
+    x=alt.X("Volatilidad anualizada (%):Q", title="Volatilidad anualizada (%)"),
+    y=alt.Y("Rendimiento acumulado (%):Q", title="Rendimiento acumulado (%)")
+)
 
-ax2.set_title("Riesgo vs rendimiento")
-ax2.set_xlabel("Volatilidad anualizada (%)")
-ax2.set_ylabel("Rendimiento acumulado (%)")
-ax2.grid(True)
+points = base.mark_circle(size=130).encode(
+    color="Activo:N",
+    tooltip=[
+        "Activo:N",
+        "Rendimiento acumulado (%):Q",
+        "Volatilidad anualizada (%):Q",
+        "Sharpe simplificado:Q",
+        "Máxima caída (%):Q"
+    ]
+)
 
-st.pyplot(fig2)
+labels = base.mark_text(align="left", dx=8, dy=-5).encode(
+    text="Activo:N"
+)
+
+st.altair_chart((points + labels).properties(height=420).interactive(), use_container_width=True)
 
 # -----------------------------
 # Gráfico 3: ranking
@@ -312,16 +332,21 @@ st.pyplot(fig2)
 
 st.subheader("Ranking final según perfil")
 
-fig3, ax3 = plt.subplots(figsize=(10, 5))
+ranking_plot = ranking_final.reset_index().rename(columns={"index": "Activo"})
 
-ax3.bar(ranking_final.index, ranking_final["Score final"])
-ax3.set_title(f"Ranking para perfil {perfil}")
-ax3.set_xlabel("Activo")
-ax3.set_ylabel("Score final")
-ax3.tick_params(axis="x", rotation=45)
-ax3.grid(axis="y")
+chart_ranking = (
+    alt.Chart(ranking_plot)
+    .mark_bar()
+    .encode(
+        x=alt.X("Activo:N", sort="-y"),
+        y=alt.Y("Score final:Q"),
+        color="Activo:N",
+        tooltip=["Activo:N", "Score final:Q"]
+    )
+    .properties(height=420)
+)
 
-st.pyplot(fig3)
+st.altair_chart(chart_ranking, use_container_width=True)
 
 # -----------------------------
 # Explicación metodológica
