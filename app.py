@@ -1,8 +1,9 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
 import altair as alt
+import requests
+import time
 
 st.set_page_config(page_title="Comparador de Activos", layout="wide")
 
@@ -69,47 +70,64 @@ def descargar_datos(tickers, periodo):
     series = {}
     errores = []
 
+    periodos_segundos = {
+        "6mo": 60 * 60 * 24 * 183,
+        "1y": 60 * 60 * 24 * 365,
+        "2y": 60 * 60 * 24 * 365 * 2,
+        "5y": 60 * 60 * 24 * 365 * 5
+    }
+
+    ahora = int(time.time())
+    inicio = ahora - periodos_segundos.get(periodo, 60 * 60 * 24 * 365)
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
     for ticker in tickers:
         try:
-            data = yf.download(
-                ticker,
-                period=periodo,
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=False
+            url = (
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                f"?period1={inicio}&period2={ahora}&interval=1d"
             )
 
-            if data is None or data.empty:
-                errores.append(f"{ticker}: no devolvió datos.")
+            response = requests.get(url, headers=headers, timeout=15)
+
+            if response.status_code != 200:
+                errores.append(f"{ticker}: error HTTP {response.status_code}.")
                 continue
 
-            if isinstance(data.columns, pd.MultiIndex):
-                if "Close" in data.columns.get_level_values(0):
-                    serie = data["Close"].iloc[:, 0]
-                else:
-                    errores.append(f"{ticker}: no tiene columna Close.")
-                    continue
-            else:
-                if "Close" in data.columns:
-                    serie = data["Close"]
-                else:
-                    errores.append(f"{ticker}: no tiene columna Close.")
-                    continue
+            data = response.json()
 
-            serie = serie.dropna().copy()
-            serie.index = pd.to_datetime(serie.index)
+            result = data.get("chart", {}).get("result", None)
 
-            if getattr(serie.index, "tz", None) is not None:
-                serie.index = serie.index.tz_localize(None)
+            if not result:
+                errores.append(f"{ticker}: Yahoo no devolvió datos.")
+                continue
 
-            serie.index = serie.index.normalize()
-            serie.name = ticker
+            result = result[0]
 
-            if len(serie) >= 30:
-                series[ticker] = serie
-            else:
+            timestamps = result.get("timestamp", [])
+            quote = result.get("indicators", {}).get("quote", [{}])[0]
+            closes = quote.get("close", [])
+
+            if not timestamps or not closes:
+                errores.append(f"{ticker}: datos incompletos.")
+                continue
+
+            df = pd.DataFrame({
+                "Fecha": pd.to_datetime(timestamps, unit="s").normalize(),
+                ticker: closes
+            })
+
+            df = df.dropna()
+
+            if len(df) < 30:
                 errores.append(f"{ticker}: tiene menos de 30 observaciones.")
+                continue
+
+            serie = df.set_index("Fecha")[ticker]
+            series[ticker] = serie
 
         except Exception as e:
             errores.append(f"{ticker}: error al descargar datos ({e}).")
